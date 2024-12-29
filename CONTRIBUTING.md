@@ -19,7 +19,7 @@ guidelines](https://github.com/docker/docker/blob/master/CONTRIBUTING.md).
 
 The requirements to build Machine are:
 
-1.  A running instance of Docker or a Golang 1.6 development environment
+1.  A running instance of Docker or a Golang 1.10 development environment
 2.  The `bash` shell
 3.  [Make](https://www.gnu.org/software/make/)
 
@@ -47,7 +47,7 @@ the directory that contains your `src` directory, e.g.:
     $ export GOPATH=/home/yourname/work
     $ mkdir -p $GOPATH/src/github.com/docker
     $ cd $GOPATH/src/github.com/docker && git clone git@github.com:docker/machine.git
-    $ cd machine        
+    $ cd machine
 
 At this point, simply run:
 
@@ -66,7 +66,7 @@ to clean-up build results.
 ## Tests and validation
 
 We use the usual `go` tools for this, to run those commands you need at least the linter which you can
-install with `go get -u github.com/golang/lint/golint`
+install with `go get -u golang.org/x/lint/golint`
 
 To run basic validation (dco, fmt), and the project unit tests, call:
 
@@ -93,9 +93,6 @@ Alternatively, if you are building natively, you can simply run:
 
     make coverage-html
 
-This will generate and open the report file:
-
-![](/docs/img/coverage.png)
 
 ## List of all targets
 
@@ -148,23 +145,11 @@ Scrub build results:
     make lint
     make dco
 
-### Restore, update and save dependencies
+### Managing dependencies
 
-When you make a fresh copy of the repo, all the dependecies are in `vendor/` directory for the builds to work. If you want to update the dependencies
-
-#### Restore the dependencies
-
-    make dep-restore
-
-   This uses godep to restores all the dependencies to your `$GOPATH`. Note that this changes the packages in your `$GOPATH`
-
-#### Add one ore more dependencies
-
-    go get -u <new dependency>
-
-#### Save the dependencies to `vendor/`
-
-    make dep-save
+When you make a fresh copy of the repo, all the dependencies are in `vendor/` directory for the build to work.
+This project uses [golang/dep](https://github.com/golang/dep) as vendor management tool. Please refer to `dep` documentation
+for further details.
 
 4. Verify the changes in your repo, commit and submit a pull request
 
@@ -238,7 +223,7 @@ in order to run the core tests on Red Hat Enterprise Linux on Amazon.
 
 ### Layout
 
-The `test/integration` directory is layed out to divide up tests based on the
+The `test/integration` directory is laid out to divide up tests based on the
 areas which the test.  If you are uncertain where to put yours, we are happy to
 guide you.
 
@@ -279,10 +264,6 @@ to ensure we keep the driver in a consistent and stable state:
     and integration tests on the new supported environment
 -   Participate in a weekly driver maintainer meeting
 
-If you can commit to those, the next step is to make sure the driver adheres
-to the [spec](https://github.com/docker/machine/blob/master/docs/DRIVER_SPEC.md).
-
-Once you have created and tested the driver, you can open a PR.
 
 Note: even if those are met does not guarantee a driver will be accepted.
 If you have questions, please do not hesitate to contact us on IRC.

@@ -9,9 +9,6 @@ PKGS := $(shell go list -tags "$(BUILDTAGS)" ./... | grep -v "/vendor/" | grep -
 GOLINT_BIN := $(GOPATH)/bin/golint
 GOLINT := $(shell [ -x $(GOLINT_BIN) ] && echo $(GOLINT_BIN) || echo '')
 
-GODEP_BIN := $(GOPATH)/bin/godep
-GODEP := $(shell [ -x $(GODEP_BIN) ] && echo $(GODEP_BIN) || echo '')
-
 # Honor debug
 ifeq ($(DEBUG),true)
 	# Disable function inlining and variable registerization
@@ -49,7 +46,7 @@ include mk/validate.mk
 default: build
 
 install:
-	cp $(PREFIX)/bin/docker-machine /usr/local/bin
+	cp $(PREFIX)/bin/$(PKG_NAME) /usr/local/bin
 
 clean: coverage-clean build-clean
 test: dco fmt test-short lint vet

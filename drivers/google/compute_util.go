@@ -3,11 +3,13 @@ package google
 import (
 	"fmt"
 	"io/ioutil"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/docker/machine/drivers/driverutil"
 	"github.com/docker/machine/libmachine/log"
 	raw "google.golang.org/api/compute/v1"
 
@@ -27,6 +29,7 @@ type ComputeUtil struct {
 	diskTypeURL       string
 	address           string
 	network           string
+	subnetwork        string
 	preemptible       bool
 	useInternalIP     bool
 	useInternalIPOnly bool
@@ -35,15 +38,14 @@ type ComputeUtil struct {
 	globalURL         string
 	SwarmMaster       bool
 	SwarmHost         string
+	openPorts         []string
 }
 
 const (
-	apiURL             = "https://www.googleapis.com/compute/v1/projects/"
-	firewallRule       = "docker-machines"
-	port               = "2376"
-	firewallTargetTag  = "docker-machine"
-	dockerStartCommand = "sudo service docker start"
-	dockerStopCommand  = "sudo service docker stop"
+	apiURL            = "https://www.googleapis.com/compute/v1/projects/"
+	firewallRule      = "docker-machines"
+	dockerPort        = "2376"
+	firewallTargetTag = "docker-machine"
 )
 
 // NewComputeUtil creates and initializes a ComputeUtil.
@@ -66,6 +68,7 @@ func newComputeUtil(driver *Driver) (*ComputeUtil, error) {
 		diskTypeURL:       driver.DiskType,
 		address:           driver.Address,
 		network:           driver.Network,
+		subnetwork:        driver.Subnetwork,
 		preemptible:       driver.Preemptible,
 		useInternalIP:     driver.UseInternalIP,
 		useInternalIPOnly: driver.UseInternalIPOnly,
@@ -74,6 +77,7 @@ func newComputeUtil(driver *Driver) (*ComputeUtil, error) {
 		globalURL:         apiURL + driver.Project + "/global",
 		SwarmMaster:       driver.SwarmMaster,
 		SwarmHost:         driver.SwarmHost,
+		openPorts:         driver.OpenPorts,
 	}, nil
 }
 
@@ -136,19 +140,20 @@ func (c *ComputeUtil) firewallRule() (*raw.Firewall, error) {
 	return c.service.Firewalls.Get(c.project, firewallRule).Do()
 }
 
-func missingOpenedPorts(rule *raw.Firewall, ports []string) []string {
-	missing := []string{}
+func missingOpenedPorts(rule *raw.Firewall, ports []string) map[string][]string {
+	missing := map[string][]string{}
 	opened := map[string]bool{}
 
 	for _, allowed := range rule.Allowed {
 		for _, allowedPort := range allowed.Ports {
-			opened[allowedPort] = true
+			opened[allowedPort+"/"+allowed.IPProtocol] = true
 		}
 	}
 
-	for _, port := range ports {
-		if !opened[port] {
-			missing = append(missing, port)
+	for _, p := range ports {
+		port, proto := driverutil.SplitPortProto(p)
+		if !opened[port+"/"+proto] {
+			missing[proto] = append(missing[proto], port)
 		}
 	}
 
@@ -156,7 +161,7 @@ func missingOpenedPorts(rule *raw.Firewall, ports []string) []string {
 }
 
 func (c *ComputeUtil) portsUsed() ([]string, error) {
-	ports := []string{port}
+	ports := []string{dockerPort + "/tcp"}
 
 	if c.SwarmMaster {
 		u, err := url.Parse(c.SwarmHost)
@@ -165,7 +170,11 @@ func (c *ComputeUtil) portsUsed() ([]string, error) {
 		}
 
 		swarmPort := strings.Split(u.Host, ":")[1]
-		ports = append(ports, swarmPort)
+		ports = append(ports, swarmPort+"/tcp")
+	}
+	for _, p := range c.openPorts {
+		port, proto := driverutil.SplitPortProto(p)
+		ports = append(ports, port+"/"+proto)
 	}
 
 	return ports, nil
@@ -197,11 +206,12 @@ func (c *ComputeUtil) openFirewallPorts(d *Driver) error {
 	if len(missingPorts) == 0 {
 		return nil
 	}
-
-	rule.Allowed = append(rule.Allowed, &raw.FirewallAllowed{
-		IPProtocol: "tcp",
-		Ports:      missingPorts,
-	})
+	for proto, ports := range missingPorts {
+		rule.Allowed = append(rule.Allowed, &raw.FirewallAllowed{
+			IPProtocol: proto,
+			Ports:      ports,
+		})
+	}
 
 	var op *raw.Operation
 	if create {
@@ -226,6 +236,13 @@ func (c *ComputeUtil) instance() (*raw.Instance, error) {
 func (c *ComputeUtil) createInstance(d *Driver) error {
 	log.Infof("Creating instance")
 
+	var net string
+	if strings.Contains(d.Network, "/networks/") {
+		net = d.Network
+	} else {
+		net = c.globalURL + "/networks/" + d.Network
+	}
+
 	instance := &raw.Instance{
 		Name:        c.instanceName,
 		Description: "docker host vm",
@@ -233,14 +250,14 @@ func (c *ComputeUtil) createInstance(d *Driver) error {
 		Disks: []*raw.AttachedDisk{
 			{
 				Boot:       true,
-				AutoDelete: false,
+				AutoDelete: true,
 				Type:       "PERSISTENT",
 				Mode:       "READ_WRITE",
 			},
 		},
 		NetworkInterfaces: []*raw.NetworkInterface{
 			{
-				Network: c.globalURL + "/networks/" + d.Network,
+				Network: net,
 			},
 		},
 		Tags: &raw.Tags{
@@ -248,13 +265,19 @@ func (c *ComputeUtil) createInstance(d *Driver) error {
 		},
 		ServiceAccounts: []*raw.ServiceAccount{
 			{
-				Email:  "default",
+				Email:  d.ServiceAccount,
 				Scopes: strings.Split(d.Scopes, ","),
 			},
 		},
 		Scheduling: &raw.Scheduling{
 			Preemptible: c.preemptible,
 		},
+	}
+
+	if strings.Contains(c.subnetwork, "/subnetworks/") {
+		instance.NetworkInterfaces[0].Subnetwork = c.subnetwork
+	} else if c.subnetwork != "" {
+		instance.NetworkInterfaces[0].Subnetwork = "projects/" + c.project + "/regions/" + c.region() + "/subnetworks/" + c.subnetwork
 	}
 
 	if !c.useInternalIPOnly {
@@ -464,4 +487,17 @@ func unwrapGoogleError(err error) error {
 	}
 
 	return err
+}
+
+func isNotFound(err error) bool {
+	googleErr, ok := err.(*googleapi.Error)
+	if !ok {
+		return false
+	}
+
+	if googleErr.Code == http.StatusNotFound {
+		return true
+	}
+
+	return false
 }

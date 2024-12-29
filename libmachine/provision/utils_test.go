@@ -43,6 +43,26 @@ tcp6       0      0 :::22                   :::*                    LISTEN`
 	}
 }
 
+func TestMatchSsOutMissing(t *testing.T) {
+	ssOut := `State      Recv-Q Send-Q Local Address:Port               Peer Address:Port              
+LISTEN     0      128          *:22                       *:*                  
+LISTEN     0      128         :::22                      :::*                  
+LISTEN     0      128         :::23760                   :::*                  `
+	if matchNetstatOut(reDaemonListening, ssOut) {
+		t.Fatal("Expected not to match the ss output as showing the daemon listening but got a match")
+	}
+}
+
+func TestMatchSsOutPresent(t *testing.T) {
+	ssOut := `State      Recv-Q Send-Q Local Address:Port               Peer Address:Port              
+LISTEN     0      128          *:22                       *:*                  
+LISTEN     0      128         :::22                      :::*                  
+LISTEN     0      128         :::2376                    :::*                  `
+	if !matchNetstatOut(reDaemonListening, ssOut) {
+		t.Fatal("Expected to match the ss output as showing the daemon listening but didn't")
+	}
+}
+
 func TestGenerateDockerOptionsBoot2Docker(t *testing.T) {
 	p := &Boot2DockerProvisioner{
 		Driver: &fakedriver.Driver{},
@@ -146,6 +166,34 @@ func TestMachineCustomPortBoot2Docker(t *testing.T) {
 	}
 }
 
+func TestUbuntuSystemdDaemonBinary(t *testing.T) {
+	p := NewUbuntuSystemdProvisioner(&fakedriver.Driver{}).(*UbuntuSystemdProvisioner)
+	cases := []struct {
+		output, want string
+	}{
+		{"Docker version 1.9.1\n", "docker daemon"},
+		{"Docker version 1.11.2\n", "docker daemon"},
+		{"Docker version 1.12.0\n", "dockerd"},
+		{"Docker version 1.13.0\n", "dockerd"},
+	}
+
+	sshCmder := &provisiontest.FakeSSHCommander{
+		Responses: make(map[string]string),
+	}
+	p.SSHCommander = sshCmder
+
+	for _, tc := range cases {
+		sshCmder.Responses["docker --version"] = tc.output
+		opts, err := p.GenerateDockerOptions(1234)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(opts.EngineOptions, tc.want) {
+			t.Fatal("incorrect docker daemon binary in engine options")
+		}
+	}
+}
+
 type fakeProvisioner struct {
 	GenericProvisioner
 }
@@ -207,4 +255,30 @@ func TestGetFilesystemType(t *testing.T) {
 	fsType, err := getFilesystemType(p, "/var/lib")
 	assert.NoError(t, err)
 	assert.Equal(t, "btrfs", fsType)
+}
+
+func TestDockerClientVersion(t *testing.T) {
+	cases := []struct {
+		output, want string
+	}{
+		{"Docker version 1.9.1, build a34a1d5\n", "1.9.1"},
+		{"Docker version 1.9.1\n", "1.9.1"},
+		{"Docker version 1.13.0-rc1, build deadbeef\n", "1.13.0-rc1"},
+		{"Docker version 1.13.0-dev, build deadbeef\n", "1.13.0-dev"},
+	}
+
+	sshCmder := &provisiontest.FakeSSHCommander{
+		Responses: make(map[string]string),
+	}
+
+	for _, tc := range cases {
+		sshCmder.Responses["docker --version"] = tc.output
+		got, err := DockerClientVersion(sshCmder)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != tc.want {
+			t.Errorf("Unexpected version string from %q; got %q, want %q", tc.output, tc.want, got)
+		}
+	}
 }

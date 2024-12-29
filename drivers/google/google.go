@@ -1,6 +1,7 @@
 package google
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -21,25 +22,30 @@ type Driver struct {
 	DiskType          string
 	Address           string
 	Network           string
+	Subnetwork        string
 	Preemptible       bool
 	UseInternalIP     bool
 	UseInternalIPOnly bool
+	ServiceAccount    string
 	Scopes            string
 	DiskSize          int
 	Project           string
 	Tags              string
 	UseExisting       bool
+	OpenPorts         []string
 }
 
 const (
-	defaultZone        = "us-central1-a"
-	defaultUser        = "docker-user"
-	defaultMachineType = "n1-standard-1"
-	defaultImageName   = "ubuntu-os-cloud/global/images/ubuntu-1510-wily-v20160627"
-	defaultScopes      = "https://www.googleapis.com/auth/devstorage.read_only,https://www.googleapis.com/auth/logging.write,https://www.googleapis.com/auth/monitoring.write"
-	defaultDiskType    = "pd-standard"
-	defaultDiskSize    = 10
-	defaultNetwork     = "default"
+	defaultZone           = "us-central1-a"
+	defaultUser           = "docker-user"
+	defaultMachineType    = "n1-standard-1"
+	defaultImageName      = "ubuntu-os-cloud/global/images/ubuntu-1604-xenial-v20170721"
+	defaultServiceAccount = "default"
+	defaultScopes         = "https://www.googleapis.com/auth/devstorage.read_only,https://www.googleapis.com/auth/logging.write,https://www.googleapis.com/auth/monitoring.write"
+	defaultDiskType       = "pd-standard"
+	defaultDiskSize       = 10
+	defaultNetwork        = "default"
+	defaultSubnetwork     = ""
 )
 
 // GetCreateFlags registers the flags this driver adds to
@@ -76,6 +82,12 @@ func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 			EnvVar: "GOOGLE_PROJECT",
 		},
 		mcnflag.StringFlag{
+			Name:   "google-service-account",
+			Usage:  "GCE Service Account for the VM (email address)",
+			Value:  defaultServiceAccount,
+			EnvVar: "GOOGLE_SERVICE_ACCOUNT",
+		},
+		mcnflag.StringFlag{
 			Name:   "google-scopes",
 			Usage:  "GCE Scopes (comma-separated if multiple scopes)",
 			Value:  defaultScopes,
@@ -98,6 +110,12 @@ func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 			Usage:  "Specify network in which to provision vm",
 			Value:  defaultNetwork,
 			EnvVar: "GOOGLE_NETWORK",
+		},
+		mcnflag.StringFlag{
+			Name:   "google-subnetwork",
+			Usage:  "Specify subnetwork in which to provision vm",
+			Value:  defaultSubnetwork,
+			EnvVar: "GOOGLE_SUBNETWORK",
 		},
 		mcnflag.StringFlag{
 			Name:   "google-address",
@@ -130,19 +148,25 @@ func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 			Usage:  "Don't create a new VM, use an existing one",
 			EnvVar: "GOOGLE_USE_EXISTING",
 		},
+		mcnflag.StringSliceFlag{
+			Name:  "google-open-port",
+			Usage: "Make the specified port number accessible from the Internet, e.g, 8080/tcp",
+		},
 	}
 }
 
 // NewDriver creates a Driver with the specified storePath.
 func NewDriver(machineName string, storePath string) *Driver {
 	return &Driver{
-		Zone:         defaultZone,
-		DiskType:     defaultDiskType,
-		DiskSize:     defaultDiskSize,
-		MachineType:  defaultMachineType,
-		MachineImage: defaultImageName,
-		Network:      defaultNetwork,
-		Scopes:       defaultScopes,
+		Zone:           defaultZone,
+		DiskType:       defaultDiskType,
+		DiskSize:       defaultDiskSize,
+		MachineType:    defaultMachineType,
+		MachineImage:   defaultImageName,
+		Network:        defaultNetwork,
+		Subnetwork:     defaultSubnetwork,
+		ServiceAccount: defaultServiceAccount,
+		Scopes:         defaultScopes,
 		BaseDriver: &drivers.BaseDriver{
 			SSHUser:     defaultUser,
 			MachineName: machineName,
@@ -173,7 +197,7 @@ func (d *Driver) DriverName() string {
 func (d *Driver) SetConfigFromFlags(flags drivers.DriverOptions) error {
 	d.Project = flags.String("google-project")
 	if d.Project == "" {
-		return fmt.Errorf("Please specify the Google Cloud Project name using the option --google-project.")
+		return errors.New("no Google Cloud Project name specified (--google-project)")
 	}
 
 	d.Zone = flags.String("google-zone")
@@ -181,15 +205,19 @@ func (d *Driver) SetConfigFromFlags(flags drivers.DriverOptions) error {
 	if !d.UseExisting {
 		d.MachineType = flags.String("google-machine-type")
 		d.MachineImage = flags.String("google-machine-image")
+		d.MachineImage = strings.TrimPrefix(d.MachineImage, "https://www.googleapis.com/compute/v1/projects/")
 		d.DiskSize = flags.Int("google-disk-size")
 		d.DiskType = flags.String("google-disk-type")
 		d.Address = flags.String("google-address")
 		d.Network = flags.String("google-network")
+		d.Subnetwork = flags.String("google-subnetwork")
 		d.Preemptible = flags.Bool("google-preemptible")
 		d.UseInternalIP = flags.Bool("google-use-internal-ip") || flags.Bool("google-use-internal-ip-only")
 		d.UseInternalIPOnly = flags.Bool("google-use-internal-ip-only")
+		d.ServiceAccount = flags.String("google-service-account")
 		d.Scopes = flags.String("google-scopes")
 		d.Tags = flags.String("google-tags")
+		d.OpenPorts = flags.StringSlice("google-open-port")
 	}
 	d.SSHUser = flags.String("google-username")
 	d.SSHPort = 22
@@ -220,11 +248,11 @@ func (d *Driver) PreCreateCheck() error {
 	instance, _ := c.instance()
 	if d.UseExisting {
 		if instance == nil {
-			return fmt.Errorf("Unable to find instance %q in zone %q.", d.MachineName, d.Zone)
+			return fmt.Errorf("unable to find instance %q in zone %q", d.MachineName, d.Zone)
 		}
 	} else {
 		if instance != nil {
-			return fmt.Errorf("Instance %q already exists in zone %q.", d.MachineName, d.Zone)
+			return fmt.Errorf("instance %q already exists in zone %q", d.MachineName, d.Zone)
 		}
 	}
 
@@ -322,7 +350,7 @@ func (d *Driver) Start() error {
 
 	instance, err := c.instance()
 	if err != nil {
-		if !strings.Contains(err.Error(), "notFound") {
+		if !isNotFound(err) {
 			return err
 		}
 	}
@@ -378,8 +406,20 @@ func (d *Driver) Remove() error {
 	}
 
 	if err := c.deleteInstance(); err != nil {
-		return err
+		if isNotFound(err) {
+			log.Warn("Remote instance does not exist, proceeding with removing local reference")
+		} else {
+			return err
+		}
 	}
 
-	return c.deleteDisk()
+	if err := c.deleteDisk(); err != nil {
+		if isNotFound(err) {
+			log.Warn("Remote disk does not exist, proceeding")
+		} else {
+			return err
+		}
+	}
+
+	return nil
 }

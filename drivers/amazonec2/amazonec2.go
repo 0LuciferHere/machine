@@ -3,6 +3,7 @@ package amazonec2
 import (
 	"crypto/md5"
 	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -38,13 +39,15 @@ const (
 	defaultVolumeType           = "gp2"
 	defaultZone                 = "a"
 	defaultSecurityGroup        = machineSecurityGroupName
+	defaultSSHPort              = 22
 	defaultSSHUser              = "ubuntu"
 	defaultSpotPrice            = "0.50"
 	defaultBlockDurationMinutes = 0
 )
 
 const (
-	keypairNotFoundCode = "InvalidKeyPair.NotFound"
+	keypairNotFoundCode             = "InvalidKeyPair.NotFound"
+	spotInstanceRequestNotFoundCode = "InvalidSpotInstanceRequestID.NotFound"
 )
 
 var (
@@ -53,7 +56,9 @@ var (
 	errorNoPrivateSSHKey                 = errors.New("using --amazonec2-keypair-name also requires --amazonec2-ssh-keypath")
 	errorMissingCredentials              = errors.New("amazonec2 driver requires AWS credentials configured with the --amazonec2-access-key and --amazonec2-secret-key options, environment variables, ~/.aws/credentials, or an instance role")
 	errorNoVPCIdFound                    = errors.New("amazonec2 driver requires either the --amazonec2-subnet-id or --amazonec2-vpc-id option or an AWS Account with a default vpc-id")
+	errorNoSubnetsFound                  = errors.New("The desired subnet could not be located in this region. Is '--amazonec2-subnet-id' or AWS_SUBNET_ID configured correctly?")
 	errorDisableSSLWithoutCustomEndpoint = errors.New("using --amazonec2-insecure-transport also requires --amazonec2-endpoint")
+	errorReadingUserData                 = errors.New("unable to read --amazonec2-userdata file")
 )
 
 type Driver struct {
@@ -82,6 +87,7 @@ type Driver struct {
 	SecurityGroupName  string
 	SecurityGroupNames []string
 
+	SecurityGroupReadOnly   bool
 	OpenPorts               []string
 	Tags                    string
 	ReservationId           string
@@ -104,6 +110,9 @@ type Driver struct {
 	RetryCount              int
 	Endpoint                string
 	DisableSSL              bool
+	UserDataFile            string
+
+	spotInstanceRequestId string
 }
 
 type clientFactory interface {
@@ -154,6 +163,11 @@ func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 			Usage:  "AWS VPC subnet id",
 			EnvVar: "AWS_SUBNET_ID",
 		},
+		mcnflag.BoolFlag{
+			Name:   "amazonec2-security-group-readonly",
+			Usage:  "Skip adding default rules to security groups",
+			EnvVar: "AWS_SECURITY_GROUP_READONLY",
+		},
 		mcnflag.StringSliceFlag{
 			Name:   "amazonec2-security-group",
 			Usage:  "AWS VPC security group",
@@ -198,9 +212,15 @@ func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 			Usage:  "AWS IAM Instance Profile",
 			EnvVar: "AWS_INSTANCE_PROFILE",
 		},
+		mcnflag.IntFlag{
+			Name:   "amazonec2-ssh-port",
+			Usage:  "SSH port",
+			Value:  defaultSSHPort,
+			EnvVar: "AWS_SSH_PORT",
+		},
 		mcnflag.StringFlag{
 			Name:   "amazonec2-ssh-user",
-			Usage:  "Set the name of the ssh user",
+			Usage:  "SSH username",
 			Value:  defaultSSHUser,
 			EnvVar: "AWS_SSH_USER",
 		},
@@ -260,6 +280,11 @@ func (d *Driver) GetCreateFlags() []mcnflag.Flag {
 			Usage:  "Disable SSL when sending requests",
 			EnvVar: "AWS_INSECURE_TRANSPORT",
 		},
+		mcnflag.StringFlag{
+			Name:   "amazonec2-userdata",
+			Usage:  "path to file with cloud-init user data",
+			EnvVar: "AWS_USERDATA",
+		},
 	}
 }
 
@@ -276,6 +301,7 @@ func NewDriver(hostName, storePath string) *Driver {
 		SpotPrice:            defaultSpotPrice,
 		BlockDurationMinutes: defaultBlockDurationMinutes,
 		BaseDriver: &drivers.BaseDriver{
+			SSHPort:     defaultSSHPort,
 			SSHUser:     defaultSSHUser,
 			MachineName: hostName,
 			StorePath:   storePath,
@@ -336,6 +362,7 @@ func (d *Driver) SetConfigFromFlags(flags drivers.DriverOptions) error {
 	d.VpcId = flags.String("amazonec2-vpc-id")
 	d.SubnetId = flags.String("amazonec2-subnet-id")
 	d.SecurityGroupNames = flags.StringSlice("amazonec2-security-group")
+	d.SecurityGroupReadOnly = flags.Bool("amazonec2-security-group-readonly")
 	d.Tags = flags.String("amazonec2-tags")
 	zone := flags.String("amazonec2-zone")
 	d.Zone = zone[:]
@@ -344,7 +371,7 @@ func (d *Driver) SetConfigFromFlags(flags drivers.DriverOptions) error {
 	d.VolumeType = flags.String("amazonec2-volume-type")
 	d.IamInstanceProfile = flags.String("amazonec2-iam-instance-profile")
 	d.SSHUser = flags.String("amazonec2-ssh-user")
-	d.SSHPort = 22
+	d.SSHPort = flags.Int("amazonec2-ssh-port")
 	d.PrivateIPOnly = flags.Bool("amazonec2-private-address-only")
 	d.UsePrivateIP = flags.Bool("amazonec2-use-private-address")
 	d.Monitoring = flags.Bool("amazonec2-monitoring")
@@ -355,6 +382,7 @@ func (d *Driver) SetConfigFromFlags(flags drivers.DriverOptions) error {
 	d.SetSwarmConfigFromFlags(flags)
 	d.RetryCount = flags.Int("amazonec2-retries")
 	d.OpenPorts = flags.StringSlice("amazonec2-open-port")
+	d.UserDataFile = flags.String("amazonec2-userdata")
 
 	d.DisableSSL = flags.Bool("amazonec2-insecure-transport")
 
@@ -395,6 +423,10 @@ func (d *Driver) SetConfigFromFlags(flags drivers.DriverOptions) error {
 		})
 		if err != nil {
 			return err
+		}
+
+		if subnets == nil || len(subnets.Subnets) == 0 {
+			return errorNoSubnetsFound
 		}
 
 		if *subnets.Subnets[0].VpcId != d.VpcId {
@@ -443,7 +475,7 @@ func (d *Driver) checkPrereqs() error {
 				return fmt.Errorf("There is no keypair with the name %s. Please verify the key name provided.", keyName)
 			}
 			if awsErr.Code() == keypairNotFoundCode && !keyShouldExist {
-				// Not a real error for 'NotFound' since we're checking existance
+				// Not a real error for 'NotFound' since we're checking existence
 			}
 		} else {
 			return err
@@ -479,7 +511,7 @@ func (d *Driver) checkPrereqs() error {
 		}
 
 		if len(subnets.Subnets) == 0 {
-			return fmt.Errorf("unable to find a subnet in the zone: %s", regionZone)
+			return fmt.Errorf("unable to find a subnet that is both in the zone %s and belonging to VPC ID %s", regionZone, d.VpcId)
 		}
 
 		d.SubnetId = *subnets.Subnets[0].SubnetId
@@ -540,11 +572,34 @@ func (d *Driver) securityGroupIds() (ids []string) {
 	return migrateStringToSlice(d.SecurityGroupId, d.SecurityGroupIds)
 }
 
+func (d *Driver) Base64UserData() (userdata string, err error) {
+	if d.UserDataFile != "" {
+		buf, ioerr := ioutil.ReadFile(d.UserDataFile)
+		if ioerr != nil {
+			log.Warnf("failed to read user data file %q: %s", d.UserDataFile, ioerr)
+			err = errorReadingUserData
+			return
+		}
+		userdata = base64.StdEncoding.EncodeToString(buf)
+	}
+	return
+}
+
 func (d *Driver) Create() error {
 	if err := d.checkPrereqs(); err != nil {
 		return err
 	}
 
+	if err := d.innerCreate(); err != nil {
+		// cleanup partially created resources
+		d.Remove()
+		return err
+	}
+
+	return nil
+}
+
+func (d *Driver) innerCreate() error {
 	log.Infof("Launching instance...")
 
 	if err := d.createKeyPair(); err != nil {
@@ -553,6 +608,13 @@ func (d *Driver) Create() error {
 
 	if err := d.configureSecurityGroups(d.securityGroupNames()); err != nil {
 		return err
+	}
+
+	var userdata string
+	if b64, err := d.Base64UserData(); err != nil {
+		return err
+	} else {
+		userdata = b64
 	}
 
 	bdm := &ec2.BlockDeviceMapping{
@@ -591,6 +653,7 @@ func (d *Driver) Create() error {
 				},
 				EbsOptimized:        &d.UseEbsOptimizedInstance,
 				BlockDeviceMappings: []*ec2.BlockDeviceMapping{bdm},
+				UserData:            &userdata,
 			},
 			InstanceCount: aws.Int64(1),
 			SpotPrice:     &d.SpotPrice,
@@ -603,15 +666,26 @@ func (d *Driver) Create() error {
 		if err != nil {
 			return fmt.Errorf("Error request spot instance: %s", err)
 		}
+		d.spotInstanceRequestId = *spotInstanceRequest.SpotInstanceRequests[0].SpotInstanceRequestId
 
 		log.Info("Waiting for spot instance...")
-		err = d.getClient().WaitUntilSpotInstanceRequestFulfilled(&ec2.DescribeSpotInstanceRequestsInput{
-			SpotInstanceRequestIds: []*string{spotInstanceRequest.SpotInstanceRequests[0].SpotInstanceRequestId},
-		})
-		if err != nil {
-			return fmt.Errorf("Error fulfilling spot request: %v", err)
+		for i := 0; i < 3; i++ {
+			// AWS eventual consistency means we could not have SpotInstanceRequest ready yet
+			err = d.getClient().WaitUntilSpotInstanceRequestFulfilled(&ec2.DescribeSpotInstanceRequestsInput{
+				SpotInstanceRequestIds: []*string{&d.spotInstanceRequestId},
+			})
+			if err != nil {
+				if awsErr, ok := err.(awserr.Error); ok {
+					if awsErr.Code() == spotInstanceRequestNotFoundCode {
+						time.Sleep(5 * time.Second)
+						continue
+					}
+				}
+				return fmt.Errorf("Error fulfilling spot request: %v", err)
+			}
+			break
 		}
-		log.Info("Created spot instance request %v", *spotInstanceRequest.SpotInstanceRequests[0].SpotInstanceRequestId)
+		log.Infof("Created spot instance request %v", d.spotInstanceRequestId)
 		// resolve instance id
 		for i := 0; i < 3; i++ {
 			// Even though the waiter succeeded, eventual consistency means we could
@@ -619,7 +693,7 @@ func (d *Driver) Create() error {
 			// few times just in case
 			var resolvedSpotInstance *ec2.DescribeSpotInstanceRequestsOutput
 			resolvedSpotInstance, err = d.getClient().DescribeSpotInstanceRequests(&ec2.DescribeSpotInstanceRequestsInput{
-				SpotInstanceRequestIds: []*string{spotInstanceRequest.SpotInstanceRequests[0].SpotInstanceRequestId},
+				SpotInstanceRequestIds: []*string{&d.spotInstanceRequestId},
 			})
 			if err != nil {
 				// Unexpected; no need to retry
@@ -662,6 +736,7 @@ func (d *Driver) Create() error {
 			},
 			EbsOptimized:        &d.UseEbsOptimizedInstance,
 			BlockDeviceMappings: []*ec2.BlockDeviceMapping{bdm},
+			UserData:            &userdata,
 		})
 
 		if err != nil {
@@ -770,6 +845,14 @@ func (d *Driver) GetSSHHostname() (string, error) {
 	return d.GetIP()
 }
 
+func (d *Driver) GetSSHPort() (int, error) {
+	if d.SSHPort == 0 {
+		d.SSHPort = defaultSSHPort
+	}
+
+	return d.SSHPort, nil
+}
+
 func (d *Driver) GetSSHUsername() string {
 	if d.SSHUser == "" {
 		d.SSHUser = defaultSSHUser
@@ -821,6 +904,14 @@ func (d *Driver) Remove() error {
 		multierr.Errs = append(multierr.Errs, err)
 	}
 
+	// In case of failure waiting for a SpotInstance, we must cancel the unfulfilled request, otherwise an instance may be created later.
+	// If the instance was created, terminating it will be enough for canceling the SpotInstanceRequest
+	if d.RequestSpotInstance && d.spotInstanceRequestId != "" {
+		if err := d.cancelSpotInstanceRequest(); err != nil {
+			multierr.Errs = append(multierr.Errs, err)
+		}
+	}
+
 	if !d.ExistingKey {
 		if err := d.deleteKeyPair(); err != nil {
 			multierr.Errs = append(multierr.Errs, err)
@@ -832,6 +923,15 @@ func (d *Driver) Remove() error {
 	}
 
 	return multierr
+}
+
+func (d *Driver) cancelSpotInstanceRequest() error {
+	// NB: Canceling a Spot instance request does not terminate running Spot instances associated with the request
+	_, err := d.getClient().CancelSpotInstanceRequests(&ec2.CancelSpotInstanceRequestsInput{
+		SpotInstanceRequestIds: []*string{&d.spotInstanceRequestId},
+	})
+
+	return err
 }
 
 func (d *Driver) getInstance() (*ec2.Instance, error) {
@@ -908,14 +1008,22 @@ func (d *Driver) createKeyPair() error {
 
 func (d *Driver) terminate() error {
 	if d.InstanceId == "" {
-		return fmt.Errorf("unknown instance")
+		log.Warn("Missing instance ID, this is likely due to a failure during machine creation")
+		return nil
 	}
 
 	log.Debugf("terminating instance: %s", d.InstanceId)
 	_, err := d.getClient().TerminateInstances(&ec2.TerminateInstancesInput{
 		InstanceIds: []*string{&d.InstanceId},
 	})
+
 	if err != nil {
+		if strings.HasPrefix(err.Error(), "unknown instance") ||
+			strings.HasPrefix(err.Error(), "InvalidInstanceID.NotFound") {
+			log.Warn("Remote instance does not exist, proceeding with removing local reference")
+			return nil
+		}
+
 		return fmt.Errorf("unable to terminate instance: %s", err)
 	}
 	return nil
@@ -1057,34 +1165,29 @@ func (d *Driver) configureSecurityGroups(groupNames []string) error {
 }
 
 func (d *Driver) configureSecurityGroupPermissions(group *ec2.SecurityGroup) ([]*ec2.IpPermission, error) {
-	hasSshPort := false
-	hasDockerPort := false
-	hasSwarmPort := false
+	if d.SecurityGroupReadOnly {
+		log.Debug("Skipping permission configuration on security groups")
+		return nil, nil
+	}
+	hasPorts := make(map[string]bool)
 	for _, p := range group.IpPermissions {
 		if p.FromPort != nil {
-			switch *p.FromPort {
-			case 22:
-				hasSshPort = true
-			case int64(dockerPort):
-				hasDockerPort = true
-			case int64(swarmPort):
-				hasSwarmPort = true
-			}
+			hasPorts[fmt.Sprintf("%d/%s", *p.FromPort, *p.IpProtocol)] = true
 		}
 	}
 
 	perms := []*ec2.IpPermission{}
 
-	if !hasSshPort {
+	if !hasPorts[fmt.Sprintf("%d/tcp", d.BaseDriver.SSHPort)] {
 		perms = append(perms, &ec2.IpPermission{
 			IpProtocol: aws.String("tcp"),
-			FromPort:   aws.Int64(22),
-			ToPort:     aws.Int64(22),
+			FromPort:   aws.Int64(int64(d.BaseDriver.SSHPort)),
+			ToPort:     aws.Int64(int64(d.BaseDriver.SSHPort)),
 			IpRanges:   []*ec2.IpRange{{CidrIp: aws.String(ipRange)}},
 		})
 	}
 
-	if !hasDockerPort {
+	if !hasPorts[fmt.Sprintf("%d/tcp", dockerPort)] {
 		perms = append(perms, &ec2.IpPermission{
 			IpProtocol: aws.String("tcp"),
 			FromPort:   aws.Int64(int64(dockerPort)),
@@ -1093,7 +1196,7 @@ func (d *Driver) configureSecurityGroupPermissions(group *ec2.SecurityGroup) ([]
 		})
 	}
 
-	if !hasSwarmPort && d.SwarmMaster {
+	if !hasPorts[fmt.Sprintf("%d/tcp", swarmPort)] && d.SwarmMaster {
 		perms = append(perms, &ec2.IpPermission{
 			IpProtocol: aws.String("tcp"),
 			FromPort:   aws.Int64(int64(swarmPort)),
@@ -1108,12 +1211,14 @@ func (d *Driver) configureSecurityGroupPermissions(group *ec2.SecurityGroup) ([]
 		if err != nil {
 			return nil, fmt.Errorf("invalid port number %s: %s", port, err)
 		}
-		perms = append(perms, &ec2.IpPermission{
-			IpProtocol: aws.String(protocol),
-			FromPort:   aws.Int64(portNum),
-			ToPort:     aws.Int64(portNum),
-			IpRanges:   []*ec2.IpRange{{CidrIp: aws.String(ipRange)}},
-		})
+		if !hasPorts[fmt.Sprintf("%s/%s", port, protocol)] {
+			perms = append(perms, &ec2.IpPermission{
+				IpProtocol: aws.String(protocol),
+				FromPort:   aws.Int64(portNum),
+				ToPort:     aws.Int64(portNum),
+				IpRanges:   []*ec2.IpRange{{CidrIp: aws.String(ipRange)}},
+			})
+		}
 	}
 
 	log.Debugf("configuring security group authorization for %s", ipRange)
@@ -1122,6 +1227,11 @@ func (d *Driver) configureSecurityGroupPermissions(group *ec2.SecurityGroup) ([]
 }
 
 func (d *Driver) deleteKeyPair() error {
+	if d.KeyName == "" {
+		log.Warn("Missing key pair name, this is likely due to a failure during machine creation")
+		return nil
+	}
+
 	log.Debugf("deleting key pair: %s", d.KeyName)
 
 	_, err := d.getClient().DeleteKeyPair(&ec2.DeleteKeyPairInput{
@@ -1142,7 +1252,11 @@ func (d *Driver) getDefaultVPCId() (string, error) {
 
 	for _, attribute := range output.AccountAttributes {
 		if *attribute.AttributeName == "default-vpc" {
-			return *attribute.AttributeValues[0].AttributeValue, nil
+			value := *attribute.AttributeValues[0].AttributeValue
+			if value == "none" {
+				return "", errors.New("default-vpc is 'none'")
+			}
+			return value, nil
 		}
 	}
 

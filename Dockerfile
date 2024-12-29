@@ -1,6 +1,13 @@
-FROM golang:1.7.1
+FROM golang:1.12.9
 
-RUN go get  github.com/golang/lint/golint \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+                openssh-client \
+                rsync \
+                fuse \
+                sshfs \
+        && rm -rf /var/lib/apt/lists/*
+
+RUN go get  golang.org/x/lint/golint \
             github.com/mattn/goveralls \
             golang.org/x/tools/cover
 

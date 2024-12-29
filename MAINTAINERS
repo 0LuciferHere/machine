@@ -11,12 +11,13 @@
 [Org]
 	[Org."Core maintainers"]
 		people = [
-			"dgageot",
-			"ehazlett",
 			"jeanlaurent",
-			"nathanleclaire",
 		]
 
+	[Org.Alumni]
+		people = [
+			"shin-",
+		]
 [people]
 
 # A reference list of all people associated with the project.
@@ -25,22 +26,12 @@
 
 	# ADD YOURSELF HERE IN ALPHABETICAL ORDER
 
-	[people.dgageot]
-	Name = "David Gageot"
-	Email = "david.gageot@docker.com"
-	GitHub = "dgageot"
-
-	[people.ehazlett]
-	Name = "Evan Hazlett"
-	Email = "ejhazlett@gmail.com"
-	GitHub = "ehazlett"
-
 	[people.jeanlaurent]
 	Name = "Jean-Laurent de Morlhon"
-	Email = "jeanlaurent@docker.com>"
+	Email = "jeanlaurent@docker.com"
 	GitHub = "jeanlaurent"
 
-	[people.nathanleclaire]
-	Name = "Nathan LeClaire"
-	Email = "nathan.leclaire@docker.com"
-	GitHub = "nathanleclaire"
+	[people.shin-]
+	Name = "Joffrey F"
+	Email = "f.joffrey@gmail.com"
+	GitHub = "shin-"

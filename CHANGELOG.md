@@ -1,5 +1,254 @@
 # Changelog
 
+# 0.16.0 (2018-11-08)
+
+### General
+
+- The default storage driver has been updated to `overlay2` for several systems
+- Improved error reporting for the `ssh` subcommand when using the `--native-ssh` flag
+
+### Drivers
+
+**amazonec2**
+
+- Improved handling of VPC errors
+
+**openstack**
+
+- Machine removal no longer fails upon attempting to delete a non-existing keypair
+
+# 0.15.0 (2018-06-12)
+
+## General
+
+- `docker-machine` can now be installed using `go install`.
+- Now built with go 1.10
+- Added keep-alive to SSH connections (#4450)
+
+## Drivers
+
+### amazonec2
+
+- Updated default AMIs to mitigate Meltdown and Spectre
+- Added `--amazonec2-security-group-readonly` flag to prevent mutating security groups
+
+### exoscale
+
+- Updated driver to v0.9.23
+
+### hyperv
+
+- Fixed Hyper-V pre-create issues (#4426)
+- Added the ability to disable Hyper-V dynamic memory management during VM creation (`--hyperv-disable-dynamic-memory`)
+
+### vmwarefusion
+
+- Improved shell checks (#4491)
+
+
+# 0.14.0 (2018-03-06)
+
+## General
+
+* Added `--client-certs` flag to the `docker-machine regenerate-certs` command.
+* Improved OpenBSD support
+* Fixed a bug with `scp` commands issued from a Windows host.
+* Enabled progress output by default for `scp` commands using `rsync`
+* Added `--quiet` flag to `scp` to suppress progress output
+* Machine now uses the `ss` command to detect connectivity when `netstat` is unavailable
+* Added bash completion for `docker-machine mount`
+* Improved provisioning resilience on Debian-based hosts
+
+## Drivers
+
+`amazonec2`
+* Added support for `eu-west-3` region
+* Upon failure, the `create` command now ensures dangling resources are cleaned up before exiting
+* Machine creation no longer fails when waiting on spot instance readiness
+
+`digitalocean`
+* Added `--digitalocean-monitoring` flag
+* Increased the default droplet size
+
+`exoscale`
+* Updated driver library
+* Several improvements and fixes to the default machine template
+* Added support for user-provided SSH key (`--exoscale-ssh-key`)
+* Added support for arbitrary disk size
+
+`google`
+* Enabled disk auto-deletion on newly created machines
+* Fixed a bug preventing the removal of a machine if it had already been removed remotely.
+* Added support for fully qualified network and subnetwork names
+
+`hyperv`
+* Fixed potential cmdlet collision with VMWare powercli
+* Fixed a bug with virtual switch selection
+* Machine now correctly detects if the user is a Hyper-V administrator when using a localized version of Windows
+
+`openstack`
+* Added `--openstack-config-drive` flag
+* Fixed an issue causing some user-uploaded keypairs to be removed when removing the associated machine.
+* Fixed a bug preventing the removal of a machine if it had already been removed remotely.
+
+`virtualbox`
+* Added OpenBSD support
+
+`vmwarefusion`
+* Improved error detection and reporting when creating a new instance
+
+`vmwarevsphere`
+* Added  `--vmwarevsphere-folder` flag
+
+
+# 0.13.0 (2017-10-12)
+
+General
+
+- Added new `docker-machine mount` command for mounting machine directories over SSHFS
+- Improved some logging messages
+- Fixed a bug with the `scp` command when using an identity file.
+- Fixed a parsing error that caused the boot2docker ISO cache to malfunction, forcing a new download everytime.
+
+Drivers
+
+- `azure`
+  - `docker-machine rm` now also cleans up the associated storage account if it has no remaining storage containers.
+  - The creation process will no longer recreate the associated subnet if it already it exists.
+- `exoscale`
+  - Updated driver
+  - Removed default `docker-machine` affinity group if no other affinity group was specified
+- `virtualbox`
+  - Fixed a bug where the machine would sometimes be assigned an invalid IP address at creation time.
+- `vmwaresphere`
+  - Added support for multiple networks
+
+# 0.12.2 (2017-7-12)
+
+General
+
+* The `scp` sub-command now allows to provide an optional `user@` to the address.
+* Fixed bash completion on OS X
+
+Drivers
+
+* `amazonec2`
+  * Updated default AMIs to the latest version of Ubuntu 16.04 LTS
+  * Fixed a bug preventing proper machine removal
+* `vmwarevsphere`
+  * Creating VMs on a DRS-enabled cluster should now work properly
+  * Fixed a bug that prevented provisioning
+* `vmwarefusion`
+  * Fixed a bug that prevented provisioning
+* `exoscale`
+  * Updated library
+
+# 0.12.1 (2017-6-30)
+
+General
+
+- Fixed an issue with the version comparison function that prevented machines created with Engine 17.06.0 from starting properly.
+
+# 0.12.0 (2017-6-5)
+
+General
+
+- Various bash completion improvements
+- Bump Go to version 1.8.3
+
+Drivers
+
+- `openstack`
+    - Enable `HTTP_PROXY`
+- `digitalocean`
+    - Add support for tagging
+- `virtualbox`
+    - Scope DHCP address range based on CIDR
+- `generic`
+    - Increase default timeout
+- `google`
+    - Add subnetwork support
+
+Provisioners
+
+- Remove restriction on `--engine-install-url` in default-to-boot2docker drivers (`virtualbox`, `vmwarefusion`, etc.)
+- Reduce provisioning time of SUSE/openSUSE systems
+
+# 0.11.0 (2017-4-25)
+
+General
+
+- Various bugfixes and updated library dependencies
+- new `docker-machine scp --delta` to invoke `rsync` behind the scenes for more efficient transfer
+
+Drivers
+
+- `digitalocean`
+  - Add support for tagging DigitalOcean instances.
+- `google`
+  - Add support for subnetworks
+
+# 0.10.0 (2017-2-27)
+
+General
+
+- Various improvements to shell tab completion
+- Add support for compiling on ARM64 architecture
+
+Drivers
+
+- Make `virtualbox` default driver
+- `amazonec2`
+    - Update AMIs to latest version of Ubuntu 16.04 LTS
+- `virtualbox`
+    - Fix parsing of `--virtualbox-share-folder` on Windows
+- `google`
+    - Add `--google-open-port` flag to specify additional ports to open
+
+Provisioners
+
+- Machine now uses systemd drop-in files instead of over-writing the system units
+- Add support for upgrade to new Docker versioning scheme
+- Use `dockerd` only in Docker versions where it is available
+- Support multiple architectures in SUSE provisioner
+
+# 0.9.0 (2017-1-17)
+
+General
+- On Windows, the `COMPOSE_CONVERT_WINDOWS_PATHS` environment variable is now set by `docker-machine env` to improve Compose usability.
+- Docker Machine can now be built on FreeBSD
+- `docker-machine scp` non-22 port support
+- `scp` supports SSH agent
+- Bump Go version to 1.7.4
+
+Drivers
+- `amazonec2`
+  - Credentials can now be loaded from IAM instance profiles
+  - Add `--amazonec2-userdata` flag
+  - Add `--amazonec2-block-duration-minutes` flag
+  - Add support for `us-east-2` (Ohio)
+  - Update base images to Ubuntu 16.04
+- `azure`
+  - Add `--azure-dns` flag for specifying DNS names
+  - Add `--azure-storage-type` flag
+  - Allow using vnets from another resource group
+  - Add AzureGermanCloud support
+  - Add support for custom data
+  - Support Service Principal authentication
+  - Update base images to Ubuntu 16.04
+- `digitalocean`
+  - Add ability to speicify the private SSH key path
+- `gce`
+  - Update base images to Ubuntu 16.04
+- `virtualbox`
+  - Shared folder location can be specified instead of "hardcoded" to `C:\Users` or `/Users`
+- `openstack`
+  - Add support for `OS_CACERT`
+
+Provisioners
+- OpenSUSE provisioner refactored to use properly supported 3rd party code
+
+
 # 0.8.2 (2016-8-26)
 
 - Update Go version to 1.7.1
@@ -250,7 +499,7 @@ Misc
 
 - Update docker-machine version
 - Updated the bash completion with new options added
-- Bugsnag: Retrieve windows version on non-english OS
+- Bugsnag: Retrieve windows version on non-English OS
 
 Drivers
 
